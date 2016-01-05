@@ -1,0 +1,672 @@
+#! /usr/bin/env python2.7
+# coding=utf-8
+
+import random
+from random import Random
+
+r = Random()
+
+from aspell import Speller
+
+speller=Speller()
+
+def bounced(low,high,x,d=1):
+    while True:
+        yield x
+        x+=d
+        if x<= low:
+            x=low
+            d=-d
+        elif x >= high:
+            x=high
+            d=-d
+
+def invert_y(limit,seq):
+    return [(limit-y,x) for y,x in seq]
+
+def with_inverts(limit,seq):
+    r=list()
+    for s in seq:
+        r.append(s)
+        r.append(invert_y(limit,s))
+    return r
+
+line_sets=dict()
+
+
+class DiagonalLines(object):
+    """Adds diagonal lines, optionally reflecting off the boundaries."""
+
+    def __init__(self,no_bend):
+        self.no_bend=no_bend
+
+    def lines(self,h,w):
+        lines=list()
+        if self.no_bend and h != w:
+            return []
+        elif self.no_bend:
+            #just the pure corner-to-corner pair ((0,0)..(h,w)) ...
+            return [[(i,i) for i in range(0,h)]]
+        else:
+            for y in range(0,h-1):
+                lines.append( zip(bounced(0,h-1,y), range(w)) )
+        # and the inverses
+        return with_inverts(h-1,lines)
+
+line_sets['pure diagonals']=DiagonalLines(True)
+line_sets['any diagonals']=DiagonalLines(False)
+
+
+class ZigZagLines(object):
+    """Adds lines that diverge from straight by a given amount."""
+    
+    def __init__(self, trail, lead):
+        self.trail=trail
+        self.lead=lead
+
+    def lines(self,h,w):
+        lines=list()
+        for y in range(self.trail,h-self.lead):
+            lines.append(zip(bounced(y-self.trail,y+self.lead,y), range(w)))
+        return with_inverts(h-1,lines)
+
+line_sets['zigzags1']=ZigZagLines(0,1)
+line_sets['zigzags11']=ZigZagLines(1,1)
+line_sets['zigzags2']=ZigZagLines(0,2)
+
+
+class KnightLines(object):
+    """A line set that moves 1 straight then 1 diagonal, or vice versa."""
+
+    def lines(self,h,w):
+        lines=list()
+
+        def r(y,x,skip_straight=False):
+            if skip_straight:
+                this=[(y,x)]
+                next_x=x+1
+            else:
+                this=[(y,x),(y,x+1)]
+                next_x=x+2
+
+            if x+2 >= w:
+                return [this[:(w-x)]]
+            res=list()
+            if y > 0:
+                res= [this+tail for tail in r(y-1,next_x)]
+            if y < h-1:
+                res+= [this+tail for tail in r(y+1,next_x)]
+            return res
+        
+        current=list()
+        for y in xrange(0,h):
+            lines += r(y,0)
+            lines += r(y,0,True)
+        return lines
+
+line_sets['knights']=KnightLines()
+
+class WheelSet(object):
+    """Base wheelset class to be overridden."""
+    
+    def __init__(self,wheels,extra_rows=0,line_sets=[]):
+        self.wheels=wheels
+        self.wheel_size=len(wheels[0]) #all wheels better be the same size!
+        self.pos=[r.randint(0,25) for i in range(len(wheels))]
+        self.extra_rows=extra_rows
+        self.spin()
+        num_wheels=len(wheels)
+        pre=range(-extra_rows,extra_rows+1)
+        pre.sort(key=lambda a:abs(a))
+        self.line_index= [[(extra_rows+row_i,i) for i in range(num_wheels)] for row_i in pre]
+        del pre
+
+        if extra_rows == 1:
+            if num_wheels == 3:
+                self.line_index.append( [(i,i) for i in range(num_wheels)] )
+                self.line_index.append( [((num_wheels-1)-i,i) for i in range(num_wheels)] )
+                self.line_index.append( [(1,0),(0,1),(1,2)] )
+                self.line_index.append( [(1,0),(2,1),(1,2)] )
+            elif num_wheels == 4:
+                self.line_index.append( [(1,0),(0,1),(0,2),(1,3)] )
+                self.line_index.append( [(1,0),(2,1),(2,2),(1,3)] )
+                #TODO 5,6,7
+        elif extra_rows == 2:
+            pass #TODO 3-7 wheels
+        #TODO more rows?
+        for lset in line_sets:
+            self.line_index+=lset.lines(2*extra_rows+1, num_wheels)
+
+    def animated_spin(self,scr):
+        r.seed() #reseed for more random results
+        final_pos=[(p+r.randint(0,self.wheel_size-1))%self.wheel_size for p in self.pos]
+        wheel=0
+        try:
+            while wheel < len(self.wheels):
+                self.pos=final_pos[:wheel]+[p-1 if p > 0 else self.wheel_size-1 for p in self.pos[wheel:]]
+                self._build_rows()
+                self.draw(scr)
+                scr.refresh()
+                if wheel < len(self.wheels)-1 or abs(self.pos[wheel] - final_pos[wheel]) >= 5:
+                    curses.napms(15)
+                else:
+                    curses.napms(15+30*(5-abs(self.pos[wheel]
+                                              - final_pos[wheel])))
+                if self.pos[wheel] == final_pos[wheel]:
+                    wheel+=1
+        except KeyboardInterrupt as e:
+            raise Exception("couldn't reach {0}[{1}] currently: {2}".format(
+                final_pos, wheel,self.pos))
+
+    def spin(self):
+        r.seed() #reseed for more random results
+        self.pos=[(p+r.randint(0,self.wheel_size-1))%self.wheel_size
+                  for p in self.pos]
+        self._build_rows()
+
+    def score_line(self, line):
+        """
+        calculates the score for a particular line.
+        This generic base gives points for lines that are all the same or
+        that spell words (according to aspell.)
+        """
+        if speller.check(line):
+            return 25*len(self.wheels)
+        f=line[0]
+        return 10*len(self.wheels) if all(c==f for c in line) else 0
+
+    def get_line(self, i):
+        return ''.join(self.rows[y][x] for (y,x) in self.line_index[i])
+
+    def score(self,lines=1):
+        hits=list()
+        for i in range(lines):
+            s=self.score_line(self.get_line(i))
+            if s:
+                hits.append((i,s))
+        return hits
+
+    def draw(self,window):
+        y=0
+        for row in self.rows:
+            window.addstr(y,0,' '.join(row))
+            y+=1
+
+    def _build_rows(self):
+        rows=list()
+        for i in range(0-self.extra_rows,1+self.extra_rows):
+            rows.append(self._build_row(i))
+        self.rows=rows
+
+    def _build_row(self,off):
+        row=''
+        for i in range(len(self.wheels)):
+            p=(self.wheel_size+self.pos[i]+off) % self.wheel_size
+            row+=self.wheels[i][p]
+        return row
+
+class Flat(WheelSet):
+    """A WheelSet with basic random wheels and scoring."""
+    
+    def __init__(self,count,**kwargs):
+        super(Flat,self).__init__(wheels=[
+                                      'qtrolgfckaisdmxpwvbzjeunhy',
+                                      'jerimgwvubfhspzdyqxlntcaok',
+                                      'fchzkmnevjxrlwgdaitybqupso',
+                                      'apwvlbminzkyxghtscjurdefoq',
+                                      'njgqfbwpkyemulcordaihxzstv',
+                                      'zijtuvrawckymgshonleqfpbxd',
+                                      'jqnauhbxoezyrgldcstmvwifkp'
+                                  ][0:count],
+                                  **kwargs)
+
+scrabble_wheel=''
+letter_values=dict()
+for ls,c,v in [('e',12,1),('ai',9,1),('o',8,1),('nrt',6,1),('lsu',4,1),
+               ('d',4,2),('g',3,2),('bcmp',2,3),('fhvwy',2,4),
+               ('k',1,5),('jx',1,8),('qz',1,10)]:
+    for l in ls:
+        letter_values[l]=v
+        scrabble_wheel+=l*c
+
+def random_scrabble_wheel():
+    wheel=list(scrabble_wheel)
+    random.shuffle(wheel)
+    return wheel
+
+class Scrabble(WheelSet):
+    """A WheelSet providing scrabble based wheels and scoring."""
+
+    def __init__(self,count,seed=None,**kwargs):
+        self.seed=seed
+        if seed:
+            random.seed(seed)
+        super(Scrabble,self).__init__(
+            wheels=[random_scrabble_wheel() for i in range(count)],
+            **kwargs)
+
+    def score_line(self,line):
+        if line == 'jackpot': #todo handle jackpot for different sizes?
+            return (10000,line)
+        if speller.check(line):
+            return (sum(letter_values[l]*pow(4,len(line)-4)
+                        for l in line)*len(line),
+                    line)
+        l=len(line)-1
+        while l>2:
+            m=None
+            for s in range(0,len(line)-l+1):
+                sub=line[s:s+l]
+                if speller.check(sub):
+                    m2=sum(letter_values[a] for a in sub)*pow(4,l-4) \
+                        if l>3 else 1
+                    if not m or m2 > m[0]:
+                        m=(m2,sub,(s,s+l))
+            if m:
+                return m
+            l-=1
+        return 0
+
+
+import curses
+from curses.wrapper import wrapper
+from itertools import cycle,chain
+
+
+class Bandit(object):
+    """\
+    The interactive one armed bandit.
+
+    Provide it with a wheel set and call run(..) to play, see run
+    for requiremnts before invoking.
+    """
+    
+    def __init__(self,game):
+        self.game=game
+        self.cash=100
+        self.lines=0
+        self.last_payout=0
+        self.last_lines=1
+        self.msg_buf=list()
+        self.last_shown=None
+
+    def message(self,msg, mode=0):
+        self.last_shown=None
+        self.msg_buf.append(msg)
+        self.msgscr.clear()
+        self.msgscr.addstr(0,0,msg,mode)
+        self.msgscr.refresh()
+
+    def earlier_message(self):
+        if self.last_shown is None:
+            self.last_shown=len(self.msg_buf)
+        self.last_shown-=1
+        if self.last_shown < 0:
+            self.last_shown=None
+            self.msgscr.clear()
+            self.msgscr.refresh()
+        else:
+            self.msgscr.clear()
+            self.msgscr.addstr(0,0,self.msg_buf[self.last_shown])
+            self.msgscr.refresh()
+
+    def later_message(self):
+        if self.last_shown is None:
+            return
+        self.last_shown+=1
+        if self.last_shown >= len(self.msg_buf):
+            self.last_shown=None
+            self.msgscr.clear()
+            self.msgscr.refresh()
+        else:
+            self.msgscr.clear()
+            self.msgscr.addstr(0,0,self.msg_buf[self.last_shown])
+            self.msgscr.refresh()
+
+    def spin(self):
+        if self.lines == 0:
+            self.message("Insert coins first!")
+            return #can't spin yet!
+        self.message("Playing {0}/{1} lines".format(self.lines,len(self.game.line_index)))
+        self.last_payout=0
+        self.draw_info()
+        #start spinning animation
+        #each frame randomly stop the next wheel?
+        self.game.animated_spin(self.whlscr)
+        #self.game.draw(self.whlscr)
+        #self.whlscr.refresh()
+        #when all stopped score played lines
+        matches=set()
+        for l,s in self.game.score(self.lines):
+            #for each line that scores, highlight it and give points
+            ind=None
+            try:
+                if len(s) >= 2:
+                    if len(s) >2:
+                        s,m,ind=s
+                    else:
+                        s,m=s
+                    message='"{2}" on line {0} for ${1}'.format(l+1,s,m)
+            except:
+                message='line {0} for {1} points'.format(l,s)
+            match=self.game.line_index[l]
+            if ind:
+                #track indices to prevent double scores for partial matches
+                b,e=ind
+                match=match[b:e]
+                if tuple(match) in matches:
+                    continue
+                matches.add(tuple(match))
+            self.message(message)
+            self.highlight_on(match,l)
+            self.whlscr.refresh()
+            curses.napms(100)
+            for p in range(s):
+                self.cash+=1
+                self.last_payout+=1
+                self.draw_info(True)
+                if s >= 50:
+                    self.jackpot_light()
+                curses.napms(250)
+            self.highlight_off(match)
+            self.whlscr.refresh()
+            self.jackpot_light_off()
+        self.last_lines=self.lines
+        #consume spent coins
+        self.lines=0
+        self.draw_info()
+
+    def highlight_line_on(self,i):
+        self.highlight_on(self.game.line_index[i],i)
+
+    def highlight_line_off(self,i):
+        self.highlight_off(self.game.line_index[i])
+        self.whlscr.refresh()
+
+    def highlight_on(self,line,color):
+        #fix for added spaces
+        #x*=2
+        try:
+            for y,x in line:
+                self.whlscr.chgat(y,x*2,1,curses.color_pair((color%7)+1)|curses.A_BOLD)
+        except curses.error as e:
+            raise Exception("problem with line: {0}".format(line))
+
+    def highlight_off(self,line):
+        for y,x in line:
+            self.whlscr.chgat(y,x*2,1,curses.color_pair(0))
+
+    def jackpot_light(self):
+        if not self.jackpot:
+            r=curses.COLOR_RED
+            y=curses.COLOR_YELLOW
+            self.jackpot=cycle([
+                ((r,0),(r,0),(0,0)),
+                ((y,r),(r,r),(0,0)),
+                ((y,r),(y,r),(0,r)),
+                ((0,r),(y,r),(y,r)),
+                ((0,0),(r,r),(y,r)),
+                ((0,0),(r,0),(r,0))
+            ])
+        l,c,r=self.jackpot.next()
+        curses.init_pair(self.light[0],*l)
+        curses.init_pair(self.light[1],*c)
+        curses.init_pair(self.light[2],*r)
+
+    def jackpot_light_off(self):
+        self.jackpot = None
+        curses.init_pair(self.light[0],0,0)
+        curses.init_pair(self.light[1],0,0)
+        curses.init_pair(self.light[2],0,0)        
+
+    def insert_coin(self):
+        if self.lines < len(self.game.line_index) and self.cash > 0:
+            self.cash -= 1
+            self.lines += 1
+            self.highlight_line_on(self.lines-1)
+            return True
+        return False
+
+    def draw_info(self,blink_cash=False):
+        att=curses.A_BOLD if blink_cash else 0
+        self.infoscr.clear()
+        self.infoscr.addstr(0,0,'$ {0:4}'.format(self.cash),att)
+        self.infoscr.addstr(1,0,'lines: {0:1}'.format(self.lines))
+        if self.last_payout:
+            self.infoscr.addstr(2,0,'won: {0:4}'.format(self.last_payout))
+        self.infoscr.refresh()
+
+    def run(self,stdscr):
+        """
+        call with curses.wrapper.wrapper()
+        so that curses is properly initialized
+        before calling and cleaned up properly
+        afterward. Though you could technically
+        do that yourself, why would you?/
+        """
+        curses.start_color()
+        for i in range(1,8):
+            curses.init_pair(i,i,0)
+        self.light=[9,10,11]
+        self.jackpot_light_off()
+        whl_h=self.game.extra_rows*2+1
+        whl_w=len(self.game.wheels)*2
+        self.stdscr = stdscr
+        self.whlscr = stdscr.subwin(whl_h,whl_w,3,3)
+        self.msgscr = stdscr.subwin(2,whl_w+21,self.game.extra_rows*2+6,1)
+        self.infoscr= stdscr.subwin(3,15,3,len(self.game.wheels)*2+6)
+        #self.infoscr.border(True)
+        #self.msgscr.border(True)
+        curses.curs_set(0)
+        #self.whlscr.leaveok(True)
+        self.draw_borders(whl_h,whl_w,15)
+        
+        self.draw_info()
+        self.game.draw(self.whlscr)
+        while True:
+            self.whlscr.refresh()
+            if self.cash <= 0:
+                self.msgscr.clear()
+                self.msgscr.addstr(0,0,"Game Over.",curses.color_pair(1)|curses.A_BOLD)
+                self.msgscr.addstr(1,0,"You're broke!",curses.A_BOLD)
+            self.msgscr.refresh()
+            c=stdscr.getch()
+            self.msgscr.clear()
+            self.highlight_line_off(self.lines-1)
+            if c == ord('c'):
+                self.insert_coin()
+                self.draw_info()
+            if c == ord('s'):
+                self.spin()
+            elif c == ord('q'):
+                break;
+            elif c == ord('a') or c == ord('m'):
+                while self.insert_coin():
+                    pass
+                self.draw_info()
+                self.spin()
+            elif c == ord('h'):
+                self.show_help()
+            elif c == ord('r'):
+                self.msgscr.addstr(0,0,'Game by reck')
+            elif c == ord('l') or c == ord(' '):
+                i=0
+                while i < self.last_lines and self.cash > 0 and self.insert_coin():
+                    i+=1
+                self.draw_info()
+                self.spin()
+            elif c == curses.KEY_UP:
+                self.earlier_message()
+            elif c == curses.KEY_DOWN:
+                self.later_message()
+
+    def show_help(self):
+        """
+        Show messages for keys and highlight all playable lines.
+        """
+        self.msgscr.addstr(0,0,'buttons: c: insert coin, s: spin') 
+        self.msgscr.addstr(1,0,' a/m: play all lines, h: show help')
+        self.msgscr.refresh()
+        self.stdscr.getch()
+        self.msgscr.clear()
+        for i in range(len(self.game.line_index)):
+            self.msgscr.addstr(0,0,'line: {0}'.format(i+1))
+            self.highlight_on(self.game.line_index[i],i)
+            self.msgscr.refresh()
+            self.whlscr.refresh()
+            self.stdscr.getch()
+            self.highlight_off(self.game.line_index[i])
+        self.msgscr.clear()
+        self.msgscr.refresh()
+
+    def draw_borders(self,whl_h,whl_w,info_w):
+        """
+        draw one time borders
+        """
+        #light
+        center=(whl_w+2+1+info_w+3+2)/2
+        self.stdscr.addch(0,center-1,curses.ACS_CKBOARD,curses.color_pair(self.light[0])|curses.A_BOLD)
+        self.stdscr.addch(0,center,curses.ACS_CKBOARD,curses.color_pair(self.light[1])|curses.A_BOLD)
+        self.stdscr.addch(0,center+1,curses.ACS_CKBOARD,curses.color_pair(self.light[2])|curses.A_BOLD)
+        #top
+        self.stdscr.addch(1,0,curses.ACS_ULCORNER)
+        for i in range(whl_w+2+1):
+            self.stdscr.addch(curses.ACS_HLINE)
+        self.stdscr.addch(curses.ACS_TTEE)
+        for i in range(info_w+2):
+            self.stdscr.addch(curses.ACS_HLINE)
+        self.stdscr.addch(curses.ACS_URCORNER)
+        #vertical bars
+        for y in range(2,2+whl_h+2):
+            self.stdscr.addch(y,0,curses.ACS_VLINE)
+            self.stdscr.addch(y,whl_w+2+2,curses.ACS_VLINE)
+            self.stdscr.addch(y,whl_w+2+info_w+5,curses.ACS_VLINE)
+        #mid horixontal
+        y+=1
+        self.stdscr.addch(y,0,curses.ACS_LTEE)
+        for i in range(whl_w+2+1):
+            self.stdscr.addch(curses.ACS_HLINE)
+        self.stdscr.addch(curses.ACS_BTEE)
+        for i in range(info_w+2):
+            self.stdscr.addch(curses.ACS_HLINE)
+        self.stdscr.addch(curses.ACS_RTEE)
+        #lower verticals
+        for i in range(2):
+            y+=1
+            self.stdscr.addch(y,0,curses.ACS_VLINE)
+            self.stdscr.addch(y,whl_w+2+info_w+5,curses.ACS_VLINE)
+        #bottom edge
+        y+=1
+        self.stdscr.addch(y,0,curses.ACS_LLCORNER)
+        for i in range(whl_w+2+1+info_w+3):
+            self.stdscr.addch(curses.ACS_HLINE)
+        self.stdscr.addch(curses.ACS_LRCORNER)
+
+from collections import defaultdict
+class BanditSim(object):
+    def __init__(self, game, rounds):
+        self.game=game
+        self.rounds=rounds
+        self.rounds_completed=0
+        self.won=defaultdict(int)
+        self.scores=defaultdict(int)
+        self.lengths=defaultdict(int)
+        self.matches=defaultdict(int)
+        self.outcomes=defaultdict(int)
+    def spin(self):
+        #spin
+        self.game.spin()
+
+        #score played lines
+        matches=set()
+        for l,s in self.game.score(len(self.game.line_index)):
+            #for each line that scores, highlight it and give points
+            ind=None
+            try:
+                if len(s) >= 2:
+                    if len(s) >2:
+                        s,m,ind=s
+                    else:
+                        s,m=s
+            except:
+                pass
+            match=self.game.line_index[l]
+            if ind:
+                #track indices to prevent double scores for partial matches
+                b,e=ind
+                match=match[b:e]
+                if tuple(match) in matches:
+                    continue
+                matches.add(tuple(match))
+            self.won[l]+=s
+            self.outcomes[s]+=1
+            self.scores[(l,s)]+=1
+            self.lengths[(l,len(match))]+=1
+            self.matches[m]+=1
+    def run(self):
+        for i in range(self.rounds):
+            self.spin()
+            self.rounds_completed+=1
+    def print_results(self,print_outcome_stats=True):
+        print 'seed: {0}'.format(self.game.seed)
+        print
+        print 'winnings'
+        print 'lines played | spent  | won    | profit '
+        for l in range(len(self.game.line_index)):
+            l+=1
+            w=sum(self.won[i] for i in range(l))
+            total_l=l*self.rounds_completed
+            print '{0:12} | {1:6} | {2:6} | {3:1.4}'.format(
+                l, total_l, w, float(w-total_l)/(total_l))
+
+        if False and print_words:
+            print 'occurences'
+            print 'count word'
+            for m,c in self.matches.iteritems():
+                print '{0:5} {1}'.format(c,m)
+
+        if print_outcome_stats:
+            print 'outome counts'
+            amts=list(int(a) for a in self.outcomes.iterkeys())
+            amts.sort()
+            for amt in amts:
+                print '{0:4} {1:5}'.format(amt, self.outcomes[amt])
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-r','--rows',
+                        help='Number of rows on the display.',
+                        dest='rows',default=5,type=int)
+    parser.add_argument('-w','--wheels',
+                        help='Number of wheels.',
+                        dest='wheels',default=7,type=int)
+    parser.add_argument('-l','--lines',
+                        help='Additonal line sets to play.',
+                        dest='line_sets',default=list(),choices=line_sets,
+                        action='append')
+    parser.add_argument('-s','--simulate',
+                        help='number of spins to simulate',
+                        dest='simulated_turns',default=None,type=int)
+    parser.add_argument('-S','--wheel-seed',
+                        help='seed for wheel generation.',
+                        dest='seed',default=None,type=int)
+    #parser.add_argument('-W','--wheel-set',dest='wheel_set',
+    #                    help='the wheels to play with.',
+    #                    type=wheel_sets,,)
+    args=parser.parse_args()
+
+    game=Scrabble(args.wheels,seed=args.seed,extra_rows=args.rows/2,line_sets=map(line_sets.get, args.line_sets))
+
+    if args.simulated_turns:
+        bandit=BanditSim(game,args.simulated_turns)
+        try:
+            bandit.run()
+        except KeyboardInterrupt:
+            pass
+        bandit.print_results()
+    else:
+        bandit = Bandit(game)
+    
+        wrapper(bandit.run)
+        curses.curs_set(1)

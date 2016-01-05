@@ -1,2 +1,9 @@
 # alpha-slots
-n alphabetic slot machine simulator
+An alphabetic slot machine simulator.
+
+# dependencies
+Python2
+aspell-python-py2
+curses
+
+
